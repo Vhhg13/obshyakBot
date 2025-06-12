@@ -42,7 +42,8 @@ func initDB() {
 			amount REAL NOT NULL,
 			reason TEXT,
 			chat_id INTEGER NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			operation_type TEXT DEFAULT 'debt'
 		)
 	`)
 	if err != nil {
@@ -93,8 +94,6 @@ func main() {
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "")
 			
 			switch update.Message.Command() {
-			case "start":
-				msg.Text = "Добро пожаловать! Используйте формат '@username сумма [причина]' для записи долга.\nВы можете указать несколько пользователей, чтобы разделить сумму между ними.\nИспользуйте @all, чтобы разделить между всеми участниками чата."
 			case "help":
 				msg.Text = `Как пользоваться ботом:
 
@@ -114,23 +113,6 @@ func main() {
 • @ivan @maria 100 ужин
 • @all 150 вечеринка
 • /history 30 - показать историю за 30 дней`
-			case "debts":
-				// Show all debts in the current chat
-				chatDebts := getChatDebts(update.Message.Chat.ID)
-				if len(chatDebts) == 0 {
-					msg.Text = "В этом чате пока нет записанных долгов."
-				} else {
-					var response strings.Builder
-					response.WriteString("Текущие долги в этом чате:\n\n")
-					for _, debt := range chatDebts {
-						response.WriteString(fmt.Sprintf("@%s должен @%s %.2f", debt.To, debt.From, debt.Amount))
-						if debt.Reason != "" {
-							response.WriteString(fmt.Sprintf(" за %s", debt.Reason))
-						}
-						response.WriteString("\n")
-					}
-					msg.Text = response.String()
-				}
 			case "balance":
 				// Calculate and show net balances
 				chatDebts := getChatDebts(update.Message.Chat.ID)
@@ -260,11 +242,28 @@ func main() {
 					response.WriteString(fmt.Sprintf("История операций за последние %d дней:\n\n", days))
 					
 					for _, debt := range history {
-						response.WriteString(fmt.Sprintf("[%s] %s должен %s %.2f", 
-							debt.Time.Format("02.01.2006 15:04"),
-							debt.To, debt.From, debt.Amount))
+						// Get operation type for this debt
+						var operationType string
+						err := db.QueryRow(`
+							SELECT operation_type 
+							FROM debts 
+							WHERE chat_id = ? AND from_user = ? AND to_user = ? AND amount = ? AND created_at = ?
+						`, debt.ChatID, debt.From, debt.To, debt.Amount, debt.Time.Format("2006-01-02 15:04:05")).Scan(&operationType)
+						if err != nil {
+							log.Printf("Error getting operation type: %v", err)
+							operationType = "debt" // Default to debt if there's an error
+						}
+
+						response.WriteString(fmt.Sprintf("[%s] ", debt.Time.Format("02.01.2006 15:04")))
+						
+						if operationType == "return" {
+							response.WriteString(fmt.Sprintf("%s вернул %s %.2f", debt.From, debt.To, debt.Amount))
+						} else {
+							response.WriteString(fmt.Sprintf("%s должен %s %.2f", debt.To, debt.From, debt.Amount))
+						}
+						
 						if debt.Reason != "" {
-							response.WriteString(fmt.Sprintf(" за %s", debt.Reason))
+							response.WriteString(fmt.Sprintf(" %s", debt.Reason))
 						}
 						response.WriteString("\n")
 					}
@@ -319,28 +318,89 @@ func main() {
 			}
 
 			// Split amount between all members
-			splitAmount := amount / float64(activeMembers-1) // Subtract 1 to exclude the author
+			splitAmount := amount / float64(activeMembers) // Subtract 1 to exclude the author
 			from := update.Message.From.UserName
 
 			var response strings.Builder
-			response.WriteString(fmt.Sprintf("Разделено %.2f между %d участниками (по %.2f каждый):\n", amount, activeMembers-1, splitAmount))
+			response.WriteString(fmt.Sprintf("Разделено %.2f между %d участниками (по %.2f каждый):\n", amount, activeMembers, splitAmount))
 
 			// Create debts for each member
 			for _, admin := range admins {
 				if !admin.User.IsBot && admin.User.UserName != from {
-					debt := Debt{
-						From:   from,
-						To:     admin.User.UserName,
-						Amount: splitAmount,
-						Reason: reason,
-						ChatID: update.Message.Chat.ID,
-						Time:   time.Now(),
-					}
-					if err := saveDebt(debt); err != nil {
-						log.Printf("Error saving debt: %v", err)
+					// Determine operation type and handle returns
+					netBalance, err := getNetBalance(update.Message.Chat.ID, from, admin.User.UserName)
+					if err != nil {
+						log.Printf("Error getting net balance: %v", err)
 						continue
 					}
-					response.WriteString(fmt.Sprintf("@%s должен @%s %.2f\n", admin.User.UserName, from, splitAmount))
+
+					if netBalance < 0 {
+						// This is a return operation
+						returnAmount := -netBalance // Convert negative balance to positive amount
+						if splitAmount <= returnAmount {
+							// Simple return - amount is less than or equal to existing debt
+							debt := Debt{
+								From:   from,
+								To:     admin.User.UserName,
+								Amount: splitAmount,
+								Reason: reason,
+								ChatID: update.Message.Chat.ID,
+								Time:   time.Now(),
+							}
+							if err := saveDebtWithType(debt, "return"); err != nil {
+								log.Printf("Error saving return: %v", err)
+								continue
+							}
+							response.WriteString(fmt.Sprintf("%s вернул %s %.2f\n", from, admin.User.UserName, splitAmount))
+						} else {
+							// Split into two operations: return existing debt and create new debt
+							// First, return the existing debt
+							returnDebt := Debt{
+								From:   from,
+								To:     admin.User.UserName,
+								Amount: returnAmount,
+								Reason: reason + " (возврат)",
+								ChatID: update.Message.Chat.ID,
+								Time:   time.Now(),
+							}
+							if err := saveDebtWithType(returnDebt, "return"); err != nil {
+								log.Printf("Error saving return: %v", err)
+								continue
+							}
+
+							// Then create new debt for the remaining amount
+							newDebtAmount := splitAmount - returnAmount
+							newDebt := Debt{
+								From:   from,
+								To:     admin.User.UserName,
+								Amount: newDebtAmount,
+								Reason: reason + " (новый долг)",
+								ChatID: update.Message.Chat.ID,
+								Time:   time.Now(),
+							}
+							if err := saveDebtWithType(newDebt, "debt"); err != nil {
+								log.Printf("Error saving new debt: %v", err)
+								continue
+							}
+							response.WriteString(fmt.Sprintf("%s вернул %s %.2f и теперь %s должен %s %.2f\n",
+								from, admin.User.UserName, returnAmount, admin.User.UserName, from, newDebtAmount))
+						}
+					} else {
+						// Regular debt operation
+						debt := Debt{
+							From:   from,
+							To:     admin.User.UserName,
+							Amount: splitAmount,
+							Reason: reason,
+							ChatID: update.Message.Chat.ID,
+							Time:   time.Now(),
+						}
+						if err := saveDebtWithType(debt, "debt"); err != nil {
+							log.Printf("Error saving debt: %v", err)
+							continue
+						}
+						response.WriteString(fmt.Sprintf("%s должен %s %.2f\n", admin.User.UserName, from, splitAmount))
+					}
 				}
 			}
 
@@ -375,20 +435,81 @@ func main() {
 
 			// Create debts for each user
 			for _, username := range usernames {
-				if username[1] != from { // Don't create debt if user owes themselves
-					debt := Debt{
-						From:   from,
-						To:     username[1],
-						Amount: splitAmount,
-						Reason: reason,
-						ChatID: update.Message.Chat.ID,
-						Time:   time.Now(),
-					}
-					if err := saveDebt(debt); err != nil {
-						log.Printf("Error saving debt: %v", err)
+				if username[1] != from {
+					// Determine operation type and handle returns
+					netBalance, err := getNetBalance(update.Message.Chat.ID, from, username[1])
+					if err != nil {
+						log.Printf("Error getting net balance: %v", err)
 						continue
 					}
-					response.WriteString(fmt.Sprintf("@%s должен @%s %.2f\n", username[1], from, splitAmount))
+
+					if netBalance < 0 {
+						// This is a return operation
+						returnAmount := -netBalance // Convert negative balance to positive amount
+						if splitAmount <= returnAmount {
+							// Simple return - amount is less than or equal to existing debt
+							debt := Debt{
+								From:   from,
+								To:     username[1],
+								Amount: splitAmount,
+								Reason: reason,
+								ChatID: update.Message.Chat.ID,
+								Time:   time.Now(),
+							}
+							if err := saveDebtWithType(debt, "return"); err != nil {
+								log.Printf("Error saving return: %v", err)
+								continue
+							}
+							response.WriteString(fmt.Sprintf("%s вернул(а) %s %.2f\n", from, username[1], splitAmount))
+						} else {
+							// Split into two operations: return existing debt and create new debt
+							// First, return the existing debt
+							returnDebt := Debt{
+								From:   from,
+								To:     username[1],
+								Amount: returnAmount,
+								Reason: reason + " (возврат)",
+								ChatID: update.Message.Chat.ID,
+								Time:   time.Now(),
+							}
+							if err := saveDebtWithType(returnDebt, "return"); err != nil {
+								log.Printf("Error saving return: %v", err)
+								continue
+							}
+
+							// Then create new debt for the remaining amount
+							newDebtAmount := splitAmount - returnAmount
+							newDebt := Debt{
+								From:   from,
+								To:     username[1],
+								Amount: newDebtAmount,
+								Reason: reason + " (новый долг)",
+								ChatID: update.Message.Chat.ID,
+								Time:   time.Now(),
+							}
+							if err := saveDebtWithType(newDebt, "debt"); err != nil {
+								log.Printf("Error saving new debt: %v", err)
+								continue
+							}
+							response.WriteString(fmt.Sprintf("%s вернул(а) %s %.2f и теперь %s должен %s %.2f\n",
+								from, username[1], returnAmount, username[1], from, newDebtAmount))
+						}
+					} else {
+						// Regular debt operation
+						debt := Debt{
+							From:   from,
+							To:     username[1],
+							Amount: splitAmount,
+							Reason: reason,
+							ChatID: update.Message.Chat.ID,
+							Time:   time.Now(),
+						}
+						if err := saveDebtWithType(debt, "debt"); err != nil {
+							log.Printf("Error saving debt: %v", err)
+							continue
+						}
+						response.WriteString(fmt.Sprintf("%s должен %s %.2f\n", username[1], from, splitAmount))
+					}
 				}
 			}
 
@@ -396,52 +517,13 @@ func main() {
 			bot.Send(msg)
 			continue
 		}
-
-		// Handle single user (original format)
-		singleRe := regexp.MustCompile(`@(\w+)\s+(\d+(?:\.\d+)?)(?:\s+(.+))?`)
-		singleMatches := singleRe.FindStringSubmatch(text)
-
-		if singleMatches != nil {
-			from := update.Message.From.UserName
-			to := singleMatches[1]
-			amount, _ := strconv.ParseFloat(singleMatches[2], 64)
-			reason := ""
-			if len(singleMatches) > 3 {
-				reason = singleMatches[3]
-			}
-
-			// Create new debt
-			debt := Debt{
-				From:   from,
-				To:     to,
-				Amount: amount,
-				Reason: reason,
-				ChatID: update.Message.Chat.ID,
-				Time:   time.Now(),
-			}
-			if err := saveDebt(debt); err != nil {
-				log.Printf("Error saving debt: %v", err)
-				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка при сохранении долга. Пожалуйста, попробуйте снова.")
-				bot.Send(msg)
-				continue
-			}
-
-			// Create response message
-			response := fmt.Sprintf("Записан долг: @%s должен @%s %.2f", to, from, amount)
-			if reason != "" {
-				response += fmt.Sprintf(" за %s", reason)
-			}
-
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, response)
-			bot.Send(msg)
-		}
 	}
 }
 
 // getDebtHistory returns all debts for a specific chat within the last n days
 func getDebtHistory(chatID int64, days int) ([]Debt, error) {
 	rows, err := db.Query(`
-		SELECT from_user, to_user, amount, reason, chat_id, created_at
+		SELECT from_user, to_user, amount, reason, chat_id, created_at, operation_type
 		FROM debts
 		WHERE chat_id = ? AND datetime(created_at) >= datetime('now', ?)
 		ORDER BY created_at DESC
@@ -456,7 +538,8 @@ func getDebtHistory(chatID int64, days int) ([]Debt, error) {
 	for rows.Next() {
 		var debt Debt
 		var createdAt string
-		err := rows.Scan(&debt.From, &debt.To, &debt.Amount, &debt.Reason, &debt.ChatID, &createdAt)
+		var operationType string
+		err := rows.Scan(&debt.From, &debt.To, &debt.Amount, &debt.Reason, &debt.ChatID, &createdAt, &operationType)
 		if err != nil {
 			log.Printf("Error scanning debt row: %v", err)
 			return nil, err
@@ -512,6 +595,20 @@ func getChatDebts(chatID int64) []Debt {
 	return debts
 }
 
+// Helper to get net balance between two users in a chat
+func getNetBalance(chatID int64, userA, userB string) (float64, error) {
+	var sumAtoB, sumBtoA float64
+	err := db.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM debts WHERE chat_id = ? AND from_user = ? AND to_user = ?`, chatID, userA, userB).Scan(&sumAtoB)
+	if err != nil {
+		return 0, err
+	}
+	err = db.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM debts WHERE chat_id = ? AND from_user = ? AND to_user = ?`, chatID, userB, userA).Scan(&sumBtoA)
+	if err != nil {
+		return 0, err
+	}
+	return sumAtoB - sumBtoA, nil
+}
+
 // saveDebt saves a debt to the database
 func saveDebt(debt Debt) error {
 	_, err := db.Exec(`
@@ -523,4 +620,13 @@ func saveDebt(debt Debt) error {
 		return err
 	}
 	return nil
+}
+
+// Add a new saveDebtWithType function:
+func saveDebtWithType(debt Debt, opType string) error {
+	_, err := db.Exec(`
+		INSERT INTO debts (from_user, to_user, amount, reason, chat_id, created_at, operation_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, debt.From, debt.To, debt.Amount, debt.Reason, debt.ChatID, debt.Time.Format("2006-01-02 15:04:05"), opType)
+	return err
 } 
