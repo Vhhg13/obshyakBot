@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"math"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	_ "github.com/mattn/go-sqlite3"
@@ -18,7 +19,7 @@ import (
 type Debt struct {
 	From    string
 	To      string
-	Amount  float64
+	Amount  int
 	Reason  string
 	ChatID  int64
 	Time    time.Time
@@ -39,7 +40,7 @@ func initDB() {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			from_user TEXT NOT NULL,
 			to_user TEXT NOT NULL,
-			amount REAL NOT NULL,
+			amount INTEGER NOT NULL,
 			reason TEXT,
 			chat_id INTEGER NOT NULL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -120,16 +121,16 @@ func main() {
 					msg.Text = "В этом чате пока нет записанных долгов."
 				} else {
 					// Create a map to store net balances between users
-					balances := make(map[string]map[string]float64)
+					balances := make(map[string]map[string]int)
 					
 					// Calculate all debts
 					for _, debt := range chatDebts {
 						// Initialize maps if they don't exist
 						if _, exists := balances[debt.From]; !exists {
-							balances[debt.From] = make(map[string]float64)
+							balances[debt.From] = make(map[string]int)
 						}
 						if _, exists := balances[debt.To]; !exists {
-							balances[debt.To] = make(map[string]float64)
+							balances[debt.To] = make(map[string]int)
 						}
 						
 						// Add the debt (To owes From)
@@ -166,9 +167,9 @@ func main() {
 								if (user1 == author || user2 == author) && amount != 0 {
 									hasDebts = true
 									if amount > 0 {
-										response.WriteString(fmt.Sprintf("%s должен %s %.2f\n", user1, user2, amount))
+										response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", user1, user2, amount/100, amount%100))
 									} else {
-										response.WriteString(fmt.Sprintf("%s должен %s %.2f\n", user2, user1, -amount))
+										response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", user2, user1, (-amount)/100, (-amount)%100))
 									}
 								}
 								
@@ -199,9 +200,9 @@ func main() {
 								// Only show non-zero balances
 								if amount != 0 {
 									if amount > 0 {
-										response.WriteString(fmt.Sprintf("%s должен %s %.2f\n", user1, user2, amount))
+										response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", user1, user2, amount/100, amount%100))
 									} else {
-										response.WriteString(fmt.Sprintf("%s должен %s %.2f\n", user2, user1, -amount))
+										response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", user2, user1, (-amount)/100, (-amount)%100))
 									}
 								}
 								
@@ -257,9 +258,9 @@ func main() {
 						response.WriteString(fmt.Sprintf("[%s] ", debt.Time.Format("02.01.2006 15:04")))
 						
 						if operationType == "return" {
-							response.WriteString(fmt.Sprintf("%s вернул %s %.2f", debt.From, debt.To, debt.Amount))
+							response.WriteString(fmt.Sprintf("%s вернул %s %d.%02d", debt.From, debt.To, debt.Amount/100, debt.Amount%100))
 						} else {
-							response.WriteString(fmt.Sprintf("%s должен %s %.2f", debt.To, debt.From, debt.Amount))
+							response.WriteString(fmt.Sprintf("%s должен %s %d.%02d", debt.To, debt.From, debt.Amount/100, debt.Amount%100))
 						}
 						
 						if debt.Reason != "" {
@@ -318,11 +319,11 @@ func main() {
 			}
 
 			// Split amount between all members
-			splitAmount := amount / float64(activeMembers) // Subtract 1 to exclude the author
+			splitAmount := int(math.Ceil((amount / float64(activeMembers))*100))
 			from := update.Message.From.UserName
 
 			var response strings.Builder
-			response.WriteString(fmt.Sprintf("Разделено %.2f между %d участниками (по %.2f каждый):\n", amount, activeMembers, splitAmount))
+			response.WriteString(fmt.Sprintf("Разделено %.2f между %d участниками (по %d.%02d каждый):\n", amount, activeMembers, splitAmount/100, splitAmount%100))
 
 			// Create debts for each member
 			for _, admin := range admins {
@@ -351,7 +352,7 @@ func main() {
 								log.Printf("Error saving return: %v", err)
 								continue
 							}
-							response.WriteString(fmt.Sprintf("%s вернул %s %.2f\n", from, admin.User.UserName, splitAmount))
+							response.WriteString(fmt.Sprintf("%s вернул %s %d.%02d\n", from, admin.User.UserName, splitAmount/100, splitAmount%100))
 						} else {
 							// Split into two operations: return existing debt and create new debt
 							// First, return the existing debt
@@ -382,8 +383,8 @@ func main() {
 								log.Printf("Error saving new debt: %v", err)
 								continue
 							}
-							response.WriteString(fmt.Sprintf("%s вернул %s %.2f и теперь %s должен %s %.2f\n",
-								from, admin.User.UserName, returnAmount, admin.User.UserName, from, newDebtAmount))
+							response.WriteString(fmt.Sprintf("%s вернул %s %d.%02d и теперь %s должен %s %d.%02d\n",
+								from, admin.User.UserName, returnAmount/100, returnAmount%100, admin.User.UserName, from, newDebtAmount/100, newDebtAmount%100))
 						}
 					} else {
 						// Regular debt operation
@@ -399,7 +400,7 @@ func main() {
 							log.Printf("Error saving debt: %v", err)
 							continue
 						}
-						response.WriteString(fmt.Sprintf("%s должен %s %.2f\n", admin.User.UserName, from, splitAmount))
+						response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", admin.User.UserName, from, splitAmount/100, splitAmount%100))
 					}
 				}
 			}
@@ -427,11 +428,11 @@ func main() {
 			}
 
 			// Split amount between users
-			splitAmount := amount / float64(len(usernames))
+			splitAmount := int(math.Ceil((amount / float64(len(usernames)))*100))
 			from := update.Message.From.UserName
 
 			var response strings.Builder
-			response.WriteString(fmt.Sprintf("Разделено %.2f между %d пользователями (по %.2f каждый):\n", amount, len(usernames), splitAmount))
+			response.WriteString(fmt.Sprintf("Разделено %.2f между %d пользователями (по %d.%02d каждый):\n", amount, len(usernames), splitAmount/100, splitAmount%100))
 
 			// Create debts for each user
 			for _, username := range usernames {
@@ -460,7 +461,7 @@ func main() {
 								log.Printf("Error saving return: %v", err)
 								continue
 							}
-							response.WriteString(fmt.Sprintf("%s вернул(а) %s %.2f\n", from, username[1], splitAmount))
+							response.WriteString(fmt.Sprintf("%s вернул(а) %s %d.%02d\n", from, username[1], splitAmount/100, splitAmount%100))
 						} else {
 							// Split into two operations: return existing debt and create new debt
 							// First, return the existing debt
@@ -491,8 +492,8 @@ func main() {
 								log.Printf("Error saving new debt: %v", err)
 								continue
 							}
-							response.WriteString(fmt.Sprintf("%s вернул(а) %s %.2f и теперь %s должен %s %.2f\n",
-								from, username[1], returnAmount, username[1], from, newDebtAmount))
+							response.WriteString(fmt.Sprintf("%s вернул(а) %s %.2f и теперь %s должен %s %d.%02d\n",
+								from, username[1], returnAmount/100, returnAmount%100, username[1], from, newDebtAmount/100, newDebtAmount%100))
 						}
 					} else {
 						// Regular debt operation
@@ -508,7 +509,7 @@ func main() {
 							log.Printf("Error saving debt: %v", err)
 							continue
 						}
-						response.WriteString(fmt.Sprintf("%s должен %s %.2f\n", username[1], from, splitAmount))
+						response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", username[1], from, splitAmount/100, splitAmount%100))
 					}
 				}
 			}
@@ -596,8 +597,8 @@ func getChatDebts(chatID int64) []Debt {
 }
 
 // Helper to get net balance between two users in a chat
-func getNetBalance(chatID int64, userA, userB string) (float64, error) {
-	var sumAtoB, sumBtoA float64
+func getNetBalance(chatID int64, userA, userB string) (int, error) {
+	var sumAtoB, sumBtoA int
 	err := db.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM debts WHERE chat_id = ? AND from_user = ? AND to_user = ?`, chatID, userA, userB).Scan(&sumAtoB)
 	if err != nil {
 		return 0, err
