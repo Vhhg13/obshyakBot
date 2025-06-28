@@ -44,12 +44,23 @@ func initDB() {
 			reason TEXT,
 			chat_id INTEGER NOT NULL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			operation_type TEXT DEFAULT 'debt'
+			operation_type TEXT DEFAULT 'debt',
+			operation_id INTEGER DEFAULT 1
 		)
 	`)
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// getNextOperationID returns the next available operation ID
+func getNextOperationID() (int, error) {
+	var maxID int
+	err := db.QueryRow(`SELECT COALESCE(MAX(operation_id), 0) FROM debts`).Scan(&maxID)
+	if err != nil {
+		return 0, err
+	}
+	return maxID + 1, nil
 }
 
 func main() {
@@ -107,6 +118,7 @@ func main() {
    • /balance - показать все долги в чате
    • /balance me - показать ваши личные долги
    • /history [дней] - показать историю операций (по умолчанию за 1 день)
+   • /cancel - отменить последнюю операцию
    • /help - показать это сообщение
 
 Примеры:
@@ -270,6 +282,97 @@ func main() {
 					}
 					msg.Text = response.String()
 				}
+			case "cancel":
+				// Find the latest operation ID and the user who performed it
+				var latestOperationID int
+				var latestOperationUser string
+				err := db.QueryRow(`
+					SELECT operation_id, from_user 
+					FROM debts 
+					WHERE chat_id = ? 
+					ORDER BY operation_id DESC, created_at DESC 
+					LIMIT 1
+				`, update.Message.Chat.ID).Scan(&latestOperationID, &latestOperationUser)
+				if err != nil {
+					msg.Text = "Ошибка при поиске последней операции. Пожалуйста, попробуйте снова."
+					bot.Send(msg)
+					continue
+				}
+
+				if latestOperationID == 0 {
+					msg.Text = "В этом чате нет операций для отмены."
+					bot.Send(msg)
+					continue
+				}
+
+				// Check if the current user is the one who performed the operation
+				currentUser := update.Message.From.UserName
+				if currentUser != latestOperationUser {
+					msg.Text = fmt.Sprintf("Вы не можете отменить эту операцию. Операция была выполнена пользователем %s.", latestOperationUser)
+					bot.Send(msg)
+					continue
+				}
+
+				// Get the operations that will be cancelled for the response message
+				rows, err := db.Query(`
+					SELECT from_user, to_user, amount, reason, operation_type 
+					FROM debts 
+					WHERE chat_id = ? AND operation_id = ?
+					ORDER BY created_at
+				`, update.Message.Chat.ID, latestOperationID)
+				if err != nil {
+					msg.Text = "Ошибка при получении информации об операции. Пожалуйста, попробуйте снова."
+					bot.Send(msg)
+					continue
+				}
+				defer rows.Close()
+
+				var cancelledOperations []string
+				for rows.Next() {
+					var fromUser, toUser, reason, operationType string
+					var amount int
+					err := rows.Scan(&fromUser, &toUser, &amount, &reason, &operationType)
+					if err != nil {
+						log.Printf("Error scanning cancelled operation: %v", err)
+						continue
+					}
+
+					var operationDesc string
+					if operationType == "return" {
+						operationDesc = fmt.Sprintf("%s вернул %s %d.%02d", fromUser, toUser, amount/100, amount%100)
+					} else {
+						operationDesc = fmt.Sprintf("%s должен %s %d.%02d", toUser, fromUser, amount/100, amount%100)
+					}
+					if reason != "" {
+						operationDesc += fmt.Sprintf(" %s", reason)
+					}
+					cancelledOperations = append(cancelledOperations, operationDesc)
+				}
+
+				// Delete all operations with the latest operation ID
+				result, err := db.Exec(`DELETE FROM debts WHERE chat_id = ? AND operation_id = ?`, update.Message.Chat.ID, latestOperationID)
+				if err != nil {
+					msg.Text = "Ошибка при отмене операции. Пожалуйста, попробуйте снова."
+					bot.Send(msg)
+					continue
+				}
+
+				rowsAffected, err := result.RowsAffected()
+				if err != nil {
+					log.Printf("Error getting rows affected: %v", err)
+				}
+
+				if rowsAffected == 0 {
+					msg.Text = "Операция не найдена или уже была отменена."
+				} else {
+					var response strings.Builder
+					response.WriteString(fmt.Sprintf("Отменена последняя операция (ID: %d):\n\n", latestOperationID))
+					for _, operation := range cancelledOperations {
+						response.WriteString(fmt.Sprintf("• %s\n", operation))
+					}
+					response.WriteString(fmt.Sprintf("\nУдалено записей: %d", rowsAffected))
+					msg.Text = response.String()
+				}
 			default:
 				msg.Text = "Неизвестная команда"
 			}
@@ -322,6 +425,15 @@ func main() {
 			splitAmount := int(math.Ceil((amount / float64(activeMembers))*100))
 			from := update.Message.From.UserName
 
+			// Generate operation ID for this interaction
+			operationID, err := getNextOperationID()
+			if err != nil {
+				log.Printf("Error generating operation ID: %v", err)
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка при обработке операции. Пожалуйста, попробуйте снова.")
+				bot.Send(msg)
+				continue
+			}
+
 			var response strings.Builder
 			response.WriteString(fmt.Sprintf("Разделено %.2f между %d участниками (по %d.%02d каждый):\n", amount, activeMembers, splitAmount/100, splitAmount%100))
 
@@ -348,7 +460,7 @@ func main() {
 								ChatID: update.Message.Chat.ID,
 								Time:   time.Now(),
 							}
-							if err := saveDebtWithType(debt, "return"); err != nil {
+							if err := saveDebtWithType(debt, "return", operationID); err != nil {
 								log.Printf("Error saving return: %v", err)
 								continue
 							}
@@ -364,7 +476,7 @@ func main() {
 								ChatID: update.Message.Chat.ID,
 								Time:   time.Now(),
 							}
-							if err := saveDebtWithType(returnDebt, "return"); err != nil {
+							if err := saveDebtWithType(returnDebt, "return", operationID); err != nil {
 								log.Printf("Error saving return: %v", err)
 								continue
 							}
@@ -379,7 +491,7 @@ func main() {
 								ChatID: update.Message.Chat.ID,
 								Time:   time.Now(),
 							}
-							if err := saveDebtWithType(newDebt, "debt"); err != nil {
+							if err := saveDebtWithType(newDebt, "debt", operationID); err != nil {
 								log.Printf("Error saving new debt: %v", err)
 								continue
 							}
@@ -396,7 +508,7 @@ func main() {
 							ChatID: update.Message.Chat.ID,
 							Time:   time.Now(),
 						}
-						if err := saveDebtWithType(debt, "debt"); err != nil {
+						if err := saveDebtWithType(debt, "debt", operationID); err != nil {
 							log.Printf("Error saving debt: %v", err)
 							continue
 						}
@@ -431,6 +543,15 @@ func main() {
 			splitAmount := int(math.Ceil((amount / float64(len(usernames)))*100))
 			from := update.Message.From.UserName
 
+			// Generate operation ID for this interaction
+			operationID, err := getNextOperationID()
+			if err != nil {
+				log.Printf("Error generating operation ID: %v", err)
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка при обработке операции. Пожалуйста, попробуйте снова.")
+				bot.Send(msg)
+				continue
+			}
+
 			var response strings.Builder
 			response.WriteString(fmt.Sprintf("Разделено %.2f между %d пользователями (по %d.%02d каждый):\n", amount, len(usernames), splitAmount/100, splitAmount%100))
 
@@ -457,7 +578,7 @@ func main() {
 								ChatID: update.Message.Chat.ID,
 								Time:   time.Now(),
 							}
-							if err := saveDebtWithType(debt, "return"); err != nil {
+							if err := saveDebtWithType(debt, "return", operationID); err != nil {
 								log.Printf("Error saving return: %v", err)
 								continue
 							}
@@ -473,7 +594,7 @@ func main() {
 								ChatID: update.Message.Chat.ID,
 								Time:   time.Now(),
 							}
-							if err := saveDebtWithType(returnDebt, "return"); err != nil {
+							if err := saveDebtWithType(returnDebt, "return", operationID); err != nil {
 								log.Printf("Error saving return: %v", err)
 								continue
 							}
@@ -488,7 +609,7 @@ func main() {
 								ChatID: update.Message.Chat.ID,
 								Time:   time.Now(),
 							}
-							if err := saveDebtWithType(newDebt, "debt"); err != nil {
+							if err := saveDebtWithType(newDebt, "debt", operationID); err != nil {
 								log.Printf("Error saving new debt: %v", err)
 								continue
 							}
@@ -505,7 +626,7 @@ func main() {
 							ChatID: update.Message.Chat.ID,
 							Time:   time.Now(),
 						}
-						if err := saveDebtWithType(debt, "debt"); err != nil {
+						if err := saveDebtWithType(debt, "debt", operationID); err != nil {
 							log.Printf("Error saving debt: %v", err)
 							continue
 						}
@@ -624,10 +745,10 @@ func saveDebt(debt Debt) error {
 }
 
 // Add a new saveDebtWithType function:
-func saveDebtWithType(debt Debt, opType string) error {
+func saveDebtWithType(debt Debt, opType string, operationID int) error {
 	_, err := db.Exec(`
-		INSERT INTO debts (from_user, to_user, amount, reason, chat_id, created_at, operation_type)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, debt.From, debt.To, debt.Amount, debt.Reason, debt.ChatID, debt.Time.Format("2006-01-02 15:04:05"), opType)
+		INSERT INTO debts (from_user, to_user, amount, reason, chat_id, created_at, operation_type, operation_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, debt.From, debt.To, debt.Amount, debt.Reason, debt.ChatID, debt.Time.Format("2006-01-02 15:04:05"), opType, operationID)
 	return err
 } 
