@@ -69,6 +69,11 @@ func main() {
 		log.Fatal("TELEGRAM_BOT_TOKEN environment variable is not set")
 	}
 
+	isWoman := make(map[string]bool)
+	for _, name := range strings.Split(os.Getenv("SKIBIDI_WOMEN"), ",") {
+		isWoman[name] = true
+	}
+
 	// Initialize database
 	initDB()
 	defer db.Close()
@@ -177,10 +182,17 @@ func main() {
 								// Only show balances involving the author
 								if (user1 == author || user2 == author) && amount != 0 {
 									hasDebts = true
+									owes := "должен"
 									if amount > 0 {
-										response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", user1, user2, amount/100, amount%100))
+										if (isWoman[user1]) {
+											owes = "должна"
+										}
+										response.WriteString(fmt.Sprintf("%s %s %s %d.%02d\n", user1, owes, user2, amount/100, amount%100))
 									} else {
-										response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", user2, user1, (-amount)/100, (-amount)%100))
+										if (isWoman[user2]) {
+											owes = "должна"
+										}
+										response.WriteString(fmt.Sprintf("%s %s %s %d.%02d\n", user2, owes, user1, (-amount)/100, (-amount)%100))
 									}
 								}
 								
@@ -210,10 +222,17 @@ func main() {
 								
 								// Only show non-zero balances
 								if amount != 0 {
+									owes := "должен"
 									if amount > 0 {
-										response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", user1, user2, amount/100, amount%100))
+										if (isWoman[user1]) {
+											owes = "должна"
+										}
+										response.WriteString(fmt.Sprintf("%s %s %s %d.%02d\n", user1, owes, user2, amount/100, amount%100))
 									} else {
-										response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", user2, user1, (-amount)/100, (-amount)%100))
+										if (isWoman[user2]) {
+											owes = "должна"
+										}
+										response.WriteString(fmt.Sprintf("%s %s %s %d.%02d\n", user2, owes, user1, (-amount)/100, (-amount)%100))
 									}
 								}
 								
@@ -269,9 +288,17 @@ func main() {
 						response.WriteString(fmt.Sprintf("[%s] ", debt.Time.Format("02.01.2006 15:04")))
 						
 						if operationType == "return" {
-							response.WriteString(fmt.Sprintf("%s вернул %s %d.%02d", debt.From, debt.To, debt.Amount/100, debt.Amount%100))
+							returnedVerb := "вернул"
+							if (isWoman[debt.From]) {
+								returnedVerb = "вернула"
+							}
+							response.WriteString(fmt.Sprintf("%s %s %s %d.%02d", debt.From, returnedVerb, debt.To, debt.Amount/100, debt.Amount%100))
 						} else {
-							response.WriteString(fmt.Sprintf("%s должен %s %d.%02d", debt.To, debt.From, debt.Amount/100, debt.Amount%100))
+							owes := "должен"
+							if (isWoman[debt.To]) {
+								owes = "должна"
+							}
+							response.WriteString(fmt.Sprintf("%s %s %s s %d.%02d", debt.To, owes, debt.From, debt.Amount/100, debt.Amount%100))
 						}
 						
 						if debt.Reason != "" {
@@ -338,9 +365,17 @@ func main() {
 
 					var operationDesc string
 					if operationType == "return" {
-						operationDesc = fmt.Sprintf("%s вернул %s %d.%02d", fromUser, toUser, amount/100, amount%100)
+						returnedVerb := "вернул"
+						if (isWoman[fromUser]) {
+							returnedVerb = "вернула"
+						}
+						operationDesc = fmt.Sprintf("%s %s %s %d.%02d", fromUser, returnedVerb, toUser, amount/100, amount%100)
 					} else {
-						operationDesc = fmt.Sprintf("%s должен %s %d.%02d", toUser, fromUser, amount/100, amount%100)
+						owes := "должен"
+						if (isWoman[toUser]) {
+							owes = "должна"
+						}
+						operationDesc = fmt.Sprintf("%s %s %s %d.%02d", toUser, owes, fromUser, amount/100, amount%100)
 					}
 					if reason != "" {
 						operationDesc += fmt.Sprintf(" %s", reason)
@@ -463,7 +498,11 @@ func main() {
 								log.Printf("Error saving return: %v", err)
 								continue
 							}
-							response.WriteString(fmt.Sprintf("%s вернул %s %d.%02d\n", from, admin.User.UserName, splitAmount/100, splitAmount%100))
+							returnedVerb := "вернул"
+							if (isWoman[from]) {
+								returnedVerb = "вернула"
+							}
+							response.WriteString(fmt.Sprintf("%s %s %s %d.%02d\n", from, returnedVerb, admin.User.UserName, splitAmount/100, splitAmount%100))
 						} else {
 							// Split into two operations: return existing debt and create new debt
 							// First, return the existing debt
@@ -471,7 +510,7 @@ func main() {
 								From:   from,
 								To:     admin.User.UserName,
 								Amount: returnAmount,
-								Reason: reason + " (возврат)",
+								Reason: reason,
 								ChatID: update.Message.Chat.ID,
 								Time:   time.Now(),
 							}
@@ -486,7 +525,7 @@ func main() {
 								From:   from,
 								To:     admin.User.UserName,
 								Amount: newDebtAmount,
-								Reason: reason + " (новый долг)",
+								Reason: reason,
 								ChatID: update.Message.Chat.ID,
 								Time:   time.Now(),
 							}
@@ -494,8 +533,16 @@ func main() {
 								log.Printf("Error saving new debt: %v", err)
 								continue
 							}
-							response.WriteString(fmt.Sprintf("%s вернул %s %d.%02d и теперь %s должен %s %d.%02d\n",
-								from, admin.User.UserName, returnAmount/100, returnAmount%100, admin.User.UserName, from, newDebtAmount/100, newDebtAmount%100))
+							returnedVerb := "вернул"
+							owes := "должен"
+							if (isWoman[from]) {
+								returnedVerb = "вернула"
+							}
+							if (isWoman[admin.User.UserName]) {
+								owes = "должна"
+							}
+							response.WriteString(fmt.Sprintf("%s %s %s %d.%02d и теперь %s %s %s %d.%02d\n",
+								from, returnedVerb, admin.User.UserName, returnAmount/100, returnAmount%100, admin.User.UserName, owes, from, newDebtAmount/100, newDebtAmount%100))
 						}
 					} else {
 						// Regular debt operation
@@ -511,7 +558,11 @@ func main() {
 							log.Printf("Error saving debt: %v", err)
 							continue
 						}
-						response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", admin.User.UserName, from, splitAmount/100, splitAmount%100))
+						owes := "должен"
+						if (isWoman[admin.User.UserName]) {
+							owes = "должна"
+						}
+						response.WriteString(fmt.Sprintf("%s %s %s %d.%02d\n", admin.User.UserName, owes, from, splitAmount/100, splitAmount%100))
 					}
 				}
 			}
@@ -532,7 +583,7 @@ func main() {
 				continue
 			}
 
-			amount := parseMoney(multimatches[2])
+			amount := parseMoney(multiMatches[2])
 			reason := ""
 			if len(multiMatches) > 3 {
 				reason = multiMatches[3]
@@ -581,7 +632,11 @@ func main() {
 								log.Printf("Error saving return: %v", err)
 								continue
 							}
-							response.WriteString(fmt.Sprintf("%s вернул %s %d.%02d\n", from, username[1], splitAmount/100, splitAmount%100))
+							returnedVerb := "вернул"
+							if (isWoman[from]) {
+								returnedVerb = "вернула"
+							}
+							response.WriteString(fmt.Sprintf("%s %s %s %d.%02d\n", from, returnedVerb,username[1], splitAmount/100, splitAmount%100))
 						} else {
 							// Split into two operations: return existing debt and create new debt
 							// First, return the existing debt
@@ -589,7 +644,7 @@ func main() {
 								From:   from,
 								To:     username[1],
 								Amount: returnAmount,
-								Reason: reason + " (возврат)",
+								Reason: reason,
 								ChatID: update.Message.Chat.ID,
 								Time:   time.Now(),
 							}
@@ -604,7 +659,7 @@ func main() {
 								From:   from,
 								To:     username[1],
 								Amount: newDebtAmount,
-								Reason: reason + " (новый долг)",
+								Reason: reason,
 								ChatID: update.Message.Chat.ID,
 								Time:   time.Now(),
 							}
@@ -612,8 +667,16 @@ func main() {
 								log.Printf("Error saving new debt: %v", err)
 								continue
 							}
-							response.WriteString(fmt.Sprintf("%s вернул(а) %s %d.%02d и теперь %s должен %s %d.%02d\n",
-								from, username[1], returnAmount/100, returnAmount%100, username[1], from, newDebtAmount/100, newDebtAmount%100))
+							returnedVerb := "вернул"
+							owes := "должен"
+							if (isWoman[from]) {
+								returnedVerb = "вернула"
+							}
+							if (isWoman[username[1]]) {
+								owes = "должна"
+							}
+							response.WriteString(fmt.Sprintf("%s %s %s %d.%02d и теперь %s %s %s %d.%02d\n",
+								from, returnedVerb, username[1], returnAmount/100, returnAmount%100, username[1], owes, from, newDebtAmount/100, newDebtAmount%100))
 						}
 					} else {
 						// Regular debt operation
@@ -629,7 +692,11 @@ func main() {
 							log.Printf("Error saving debt: %v", err)
 							continue
 						}
-						response.WriteString(fmt.Sprintf("%s должен %s %d.%02d\n", username[1], from, splitAmount/100, splitAmount%100))
+						owes := "должен"
+						if (isWoman[username[1]]) {
+							owes = "должна"
+						}
+						response.WriteString(fmt.Sprintf("%s %s %s %d.%02d\n", username[1], owes, from, splitAmount/100, splitAmount%100))
 					}
 				}
 			}
