@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"math"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	_ "github.com/mattn/go-sqlite3"
@@ -415,14 +414,14 @@ func main() {
 				continue
 			}
 
-			amount, _ := strconv.ParseFloat(allMatches[1], 64)
+			amount := parseMoney(allMatches[1])
 			reason := ""
 			if len(allMatches) > 2 {
 				reason = allMatches[2]
 			}
 
 			// Split amount between all members
-			splitAmount := int(math.Ceil((amount / float64(activeMembers))*100))
+			splitAmount := amount / activeMembers
 			from := update.Message.From.UserName
 
 			// Generate operation ID for this interaction
@@ -533,14 +532,14 @@ func main() {
 				continue
 			}
 
-			amount, _ := strconv.ParseFloat(multiMatches[2], 64)
+			amount := parseMoney(multimatches[2])
 			reason := ""
 			if len(multiMatches) > 3 {
 				reason = multiMatches[3]
 			}
 
 			// Split amount between users
-			splitAmount := int(math.Ceil((amount / float64(len(usernames)))*100))
+			splitAmount := amount / len(usernames)
 			from := update.Message.From.UserName
 
 			// Generate operation ID for this interaction
@@ -582,7 +581,7 @@ func main() {
 								log.Printf("Error saving return: %v", err)
 								continue
 							}
-							response.WriteString(fmt.Sprintf("%s вернул(а) %s %d.%02d\n", from, username[1], splitAmount/100, splitAmount%100))
+							response.WriteString(fmt.Sprintf("%s вернул %s %d.%02d\n", from, username[1], splitAmount/100, splitAmount%100))
 						} else {
 							// Split into two operations: return existing debt and create new debt
 							// First, return the existing debt
@@ -613,7 +612,7 @@ func main() {
 								log.Printf("Error saving new debt: %v", err)
 								continue
 							}
-							response.WriteString(fmt.Sprintf("%s вернул(а) %s %.2f и теперь %s должен %s %d.%02d\n",
+							response.WriteString(fmt.Sprintf("%s вернул(а) %s %d.%02d и теперь %s должен %s %d.%02d\n",
 								from, username[1], returnAmount/100, returnAmount%100, username[1], from, newDebtAmount/100, newDebtAmount%100))
 						}
 					} else {
@@ -752,3 +751,12 @@ func saveDebtWithType(debt Debt, opType string, operationID int) error {
 	`, debt.From, debt.To, debt.Amount, debt.Reason, debt.ChatID, debt.Time.Format("2006-01-02 15:04:05"), opType, operationID)
 	return err
 } 
+
+func parseMoney(money string) (res int) {
+	for _, char := range money {
+		if char == '.' { continue }
+		res *= 10
+		res += int(char - '0')
+	}
+	return
+}
