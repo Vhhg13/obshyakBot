@@ -469,7 +469,7 @@ func main() {
 			}
 
 			var response strings.Builder
-			response.WriteString(fmt.Sprintf("Разделено %.2f между %d участниками (по %d.%02d каждый):\n", amount, activeMembers, splitAmount/100, splitAmount%100))
+			response.WriteString(fmt.Sprintf("Разделено %d.%02d между %d участниками (по %d.%02d каждый):\n", amount/100, amount%100, activeMembers, splitAmount/100, splitAmount%100))
 
 			// Create debts for each member
 			for _, admin := range admins {
@@ -603,7 +603,7 @@ func main() {
 			}
 
 			var response strings.Builder
-			response.WriteString(fmt.Sprintf("Разделено %.2f между %d пользователями (по %d.%02d каждый):\n", amount, len(usernames), splitAmount/100, splitAmount%100))
+			response.WriteString(fmt.Sprintf("Разделено %d.%02d между %d пользователями (по %d.%02d каждый):\n", amount/100, amount%100, len(usernames), splitAmount/100, splitAmount%100))
 
 			// Create debts for each user
 			for _, username := range usernames {
@@ -820,10 +820,17 @@ func saveDebtWithType(debt Debt, opType string, operationID int) error {
 } 
 
 func parseMoney(money string) (res int) {
-	for _, char := range money {
-		if char == '.' { continue }
-		res *= 10
-		res += int(char - '0')
+	parts := strings.Split(money, ".")
+	num, _ := strconv.Atoi(parts[0])
+	res += num
+	res *= 100
+	if len(parts) == 1 {
+		return
 	}
+	num, _ = strconv.Atoi(parts[1])
+	if (num < 10) {
+		num *= 10
+	}
+	res += num
 	return
 }
