@@ -117,6 +117,7 @@ func main() {
    • @username сумма [причина] - записать долг для одного человека
    • @user1 @user2 сумма [причина] - разделить сумму между несколькими людьми
    • @all сумма [причина] - разделить сумму между всеми участниками чата
+   • /each @username1 [@username2 ...] сумма [причина] - дать сумму в долг каждому из указанных пользователей
 
 2. Команды:
    • /balance - показать все долги в чате
@@ -407,6 +408,146 @@ func main() {
 					response.WriteString(fmt.Sprintf("\nУдалено записей: %d", rowsAffected))
 					msg.Text = response.String()
 				}
+			case "each":
+				// /each @username1 [@username2 ...] amount [reason]
+				args := update.Message.CommandArguments()
+				// Regex: one or more @username, then amount, then optional reason
+				// Example: /each @ivan @maria 100 ужин
+				//          /each @ivan 50
+				//          /each @ivan @maria 100
+				//          /each @ivan 100 обед
+				//          /each @ivan @maria 100
+				//          /each @ivan @maria 100.50 ужин
+				//          /each @ivan 100.50
+				//          /each @ivan @maria 100.50
+				//          /each @ivan @maria 100.50 reason with spaces
+				// Regex: ((?:@\w+\s+)+)(\d+(?:\.\d+)?)(?:\s+(.+))?
+				multiRe := regexp.MustCompile(`((?:@\w+\s+)+)(\d+(?:\.\d+)?)(?:\s+(.+))?`)
+				multiMatches := multiRe.FindStringSubmatch(args)
+				if multiMatches == nil {
+					msg.Text = "Использование: /each @username1 [@username2 ...] сумма [причина]"
+					bot.Send(msg)
+					continue
+				}
+
+				usernames := regexp.MustCompile(`@(\w+)`).FindAllStringSubmatch(multiMatches[1], -1)
+				if len(usernames) == 0 {
+					msg.Text = "Не указаны пользователи. Использование: /each @username1 [@username2 ...] сумма [причина]"
+					bot.Send(msg)
+					continue
+				}
+
+				amount := parseMoney(multiMatches[2])
+				reason := ""
+				if len(multiMatches) > 3 {
+					reason = multiMatches[3]
+				}
+
+				from := update.Message.From.UserName
+				operationID, err := getNextOperationID()
+				if err != nil {
+					log.Printf("Error generating operation ID: %v", err)
+					msg.Text = "Ошибка при обработке операции. Пожалуйста, попробуйте снова."
+					bot.Send(msg)
+					continue
+				}
+
+				var response strings.Builder
+				response.WriteString(fmt.Sprintf("Добавлены долги по %d.%02d для %d пользователей:\n", amount/100, amount%100, len(usernames)))
+
+				for _, username := range usernames {
+					if username[1] == from {
+						continue // skip self
+					}
+					netBalance, err := getNetBalance(update.Message.Chat.ID, from, username[1])
+					if err != nil {
+						log.Printf("Error getting net balance: %v", err)
+						continue
+					}
+
+					if netBalance < 0 {
+						// This is a return operation
+						returnAmount := -netBalance
+						if amount <= returnAmount {
+							debt := Debt{
+								From:   from,
+								To:     username[1],
+								Amount: amount,
+								Reason: reason,
+								ChatID: update.Message.Chat.ID,
+								Time:   time.Now(),
+							}
+							if err := saveDebtWithType(debt, "return", operationID); err != nil {
+								log.Printf("Error saving return: %v", err)
+								continue
+							}
+							returnedVerb := "вернул"
+							if isWoman[from] {
+								returnedVerb = "вернула"
+							}
+							response.WriteString(fmt.Sprintf("%s %s %s %d.%02d\n", from, returnedVerb, username[1], amount/100, amount%100))
+						} else {
+							// Split into two operations: return existing debt and create new debt
+							returnDebt := Debt{
+								From:   from,
+								To:     username[1],
+								Amount: returnAmount,
+								Reason: reason,
+								ChatID: update.Message.Chat.ID,
+								Time:   time.Now(),
+							}
+							if err := saveDebtWithType(returnDebt, "return", operationID); err != nil {
+								log.Printf("Error saving return: %v", err)
+								continue
+							}
+							newDebtAmount := amount - returnAmount
+							newDebt := Debt{
+								From:   from,
+								To:     username[1],
+								Amount: newDebtAmount,
+								Reason: reason,
+								ChatID: update.Message.Chat.ID,
+								Time:   time.Now(),
+							}
+							if err := saveDebtWithType(newDebt, "debt", operationID); err != nil {
+								log.Printf("Error saving new debt: %v", err)
+								continue
+							}
+							returnedVerb := "вернул"
+							owes := "должен"
+							if isWoman[from] {
+								returnedVerb = "вернула"
+							}
+							if isWoman[username[1]] {
+								owes = "должна"
+							}
+							response.WriteString(fmt.Sprintf("%s %s %s %d.%02d и теперь %s %s %s %d.%02d\n",
+								from, returnedVerb, username[1], returnAmount/100, returnAmount%100, username[1], owes, from, newDebtAmount/100, newDebtAmount%100))
+						}
+					} else {
+						// Regular debt operation
+						debt := Debt{
+							From:   from,
+							To:     username[1],
+							Amount: amount,
+							Reason: reason,
+							ChatID: update.Message.Chat.ID,
+							Time:   time.Now(),
+						}
+						if err := saveDebtWithType(debt, "debt", operationID); err != nil {
+							log.Printf("Error saving debt: %v", err)
+							continue
+						}
+						owes := "должен"
+						if isWoman[username[1]] {
+							owes = "должна"
+						}
+						response.WriteString(fmt.Sprintf("%s %s %s %d.%02d\n", username[1], owes, from, amount/100, amount%100))
+					}
+				}
+				msg.Text = response.String()
+				bot.Send(msg)
+				continue
 			default:
 				msg.Text = "Неизвестная команда"
 			}
